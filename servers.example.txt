@@ -1,0 +1,31 @@
+# servers.txt — list of 3CX servers to deploy the cert to
+#
+# Copy this file to servers.txt and replace the examples with your hosts.
+# servers.txt is listed in .gitignore and should never be committed.
+#
+# Two formats are supported and can be mixed in the same file.
+#
+# ---- CSV format --------------------------------------------------------------
+# fqdn,username,password[,port[,keyfile]]
+#
+# - Header row is optional and ignored if present.
+# - Leave password blank to use key auth (keyfile column) or .ssh_passwords fallback.
+# - Leave port blank to use SSH_DEFAULT_PORT from cert.conf (default: 22).
+# - Leave keyfile blank for password auth.
+# - Passwords containing commas are not supported in CSV format.
+#
+# fqdn,username,password,port,keyfile
+pbx1.example.com,root,SecretPassword,,
+pbx2.example.com,root,AnotherPassword,22,
+pbx3.example.com,root,,22,/home/admin/.ssh/id_ed25519
+
+# ---- Key=value format --------------------------------------------------------
+# hostname [user=<name>] [port=<number>] [key=</path/to/key>]
+#
+# - Omit user/port to use SSH_DEFAULT_USER/SSH_DEFAULT_PORT from cert.conf.
+# - For password auth, omit key= and add the password to .ssh_passwords instead:
+#     hostname=thepassword
+#
+# pbx4.example.com
+# pbx5.example.com user=root port=22 key=/home/admin/.ssh/id_ed25519
+# pbx6.example.com port=2222 key=/home/admin/.ssh/datacenter2_key

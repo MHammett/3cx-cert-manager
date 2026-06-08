@@ -1,0 +1,59 @@
+# cert.conf.example — configuration template for 3cx-cert-manager
+#
+# Copy this file to cert.conf and fill in your values.
+# cert.conf is listed in .gitignore and should never be committed.
+#
+# Usage: referenced automatically, or with --config /path/to/cert.conf
+
+# ---- CSR subject fields ------------------------------------------------------
+# These are embedded in the certificate signing request sent to your CA.
+CERT_CN="*.pbx.example.com"     # Common Name — wildcard covers all *.pbx.example.com hosts
+CERT_O="Your Organization"       # Legal organization name
+CERT_L="City"                    # Locality / city
+CERT_ST="State"                  # Full state or province name (not abbreviation)
+CERT_C="US"                      # ISO 3166-1 alpha-2 country code
+
+# ---- Local output files ------------------------------------------------------
+# The private key and CSR are written here. This directory is gitignored.
+# Guard the key file carefully — it corresponds directly to the issued cert.
+OUTPUT_DIR="./certs"
+KEY_FILENAME="wildcard.key"
+CSR_FILENAME="wildcard.csr"
+
+# ---- Remote 3CX cert directory -----------------------------------------------
+# Standard path for 3CX v20 single-instance installations (Debian-based).
+# Adjust if your environment differs (e.g. a non-default installation path).
+REMOTE_CERT_DIR="/var/lib/3cxpbx/Bin/nginx/conf/Instance1"
+REMOTE_CERT_OWNER="phonesystem:phonesystem"
+REMOTE_CERT_PERMS="640"
+
+# ---- Archive suffix ----------------------------------------------------------
+# The existing live cert and key are renamed with this suffix before being
+# replaced. $(date +%Y) evaluates at deploy time on the local machine.
+# You can also use a literal string like ".2026" or ".pre-renewal".
+ARCHIVE_SUFFIX=".$(date +%Y)"
+
+# ---- SSH defaults (overridable per-server in servers.txt) --------------------
+SSH_DEFAULT_USER="root"
+SSH_DEFAULT_PORT="22"
+SSH_DEFAULT_KEY=""    # Path to SSH private key. Leave empty to use password auth
+                      # (password auth requires sshpass and an entry in .ssh_passwords).
+
+# SSH host key checking behavior:
+#   accept-new  — automatically accept unknown hosts, reject changed keys (default)
+#   yes         — strict: reject both unknown and changed keys (safest)
+#   no          — skip all host key checks (not recommended for production)
+SSH_STRICT="accept-new"
+
+# ---- Cert verification -------------------------------------------------------
+# Space-separated list of ports the `verify` command checks (client-side, against
+# each server's public endpoint). A server passes if its cert is confirmed live on
+# at least one of these ports.
+# 443  = standard HTTPS
+# 5001 = legacy 3CX management port (cannot be changed in 3CX)
+VERIFY_PORTS="443 5001"
+
+# `verify` flags any served cert that expires within this many days (in addition
+# to ones already expired or that don't match the hostname), and exits non-zero
+# so it can drive a scheduled health check / alert.
+VERIFY_EXPIRY_WARN_DAYS="30"

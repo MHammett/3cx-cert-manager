@@ -1,0 +1,5 @@
+# This is a bash tool: shell scripts MUST use LF line endings or they break on
+# Linux/macOS (`bad interpreter: .../bash^M`). Force LF in the repository and in
+# the working tree on every platform, regardless of a user's core.autocrlf.
+* text=auto eol=lf
+*.sh text eol=lf

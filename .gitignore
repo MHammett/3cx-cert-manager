@@ -1,0 +1,30 @@
+# Defensive default for a credential-handling tool: ignore EVERYTHING, then
+# explicitly allow only the files that are safe to publish. This way any
+# secret-bearing file — cert.conf, servers.txt, .ssh_passwords, rollback.txt,
+# ad-hoc server lists, trace logs, the certs/ and logs/ dirs — is excluded by
+# default and cannot be committed by accident. New files are ignored until you
+# deliberately allow them here.
+*
+
+# --- Safe to publish -------------------------------------------------------
+!.gitignore
+!.gitattributes
+!*.sh
+!README.md
+!LICENSE
+!CONTRIBUTING.md
+!CHANGELOG.md
+
+# Templates only — these contain placeholders, never real secrets
+!cert.conf.example
+!servers.example.txt
+
+# Tests and CI (un-ignore the dirs first, then their files)
+!tests/
+!tests/*.sh
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
+
+# Everything else (cert.conf, servers.txt, .ssh_passwords, rollback.txt,
+# certs/, logs/, trace.txt, *.key, *.pem, *.csr, *.p12, *.pfx, ...) stays local.
