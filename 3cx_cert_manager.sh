@@ -28,7 +28,7 @@ set -euo pipefail
 # permission-less mounts like /mnt/c under WSL.
 umask 077
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -61,6 +61,8 @@ PARALLEL=false
 FORCE=false   # --force: install even if the cert doesn't cover the server's FQDN
 KEY_FILE=""   # explicit key path; defaults to OUTPUT_DIR/KEY_FILENAME after config loads
 LOG_FILE=""   # auto-generated under LOG_DIR if not set; "none" to disable
+REFRESH_HOST_KEYS=""  # --refresh-host-keys: comma-separated hosts whose changed SSH key to relearn
+ACCEPT_KEYS=""        # --accept-key host=SHA256:..  (comma-separated) — relearn only if live key matches
 CONSOLE_FD=1  # 1 normally; becomes 3 (saved console) when full output is redirected to a log
 PREPARE_QUIET=false  # when true, prepare_server_list suppresses its dup/incomplete warnings
 
@@ -298,6 +300,73 @@ make_ssh_cmds() {
     fi
     return 0
 }
+
+# ---- SSH host-key handling ---------------------------------------------------
+# Live SHA256 fingerprint(s) the host currently presents (via ssh-keyscan).
+# Echoes one fingerprint per line; empty + non-zero if the host is unreachable.
+hostkey_live_fps() {
+    local host="$1" port="${2:-22}" out
+    out=$(ssh-keyscan -T 7 -p "${port}" "${host}" 2>/dev/null | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
+    [[ -n "${out}" ]] || return 1
+    printf '%s\n' "${out}" | sort -u
+}
+
+# Stored SHA256 fingerprint(s) for the host from known_hosts (empty if none).
+hostkey_stored_fps() {
+    ssh-keygen -l -F "$1" 2>/dev/null | awk '{print $2}' | grep '^SHA256:' | sort -u
+}
+
+# Classify a host's key. Sets globals: _HK_STATE (ok|new|changed|unreachable),
+# _HK_OLD (stored fp summary), _HK_NEW (live fp summary).
+hostkey_status() {
+    local host="$1" port="${2:-22}" live stored
+    _HK_STATE="" _HK_OLD="" _HK_NEW=""
+    live=$(hostkey_live_fps "${host}" "${port}") || { _HK_STATE="unreachable"; return 0; }
+    _HK_NEW=$(paste -sd' ' <<<"${live}")
+    stored=$(hostkey_stored_fps "${host}")
+    if [[ -z "${stored}" ]]; then _HK_STATE="new"; return 0; fi
+    _HK_OLD=$(paste -sd' ' <<<"${stored}")
+    # Changed only if NONE of the live fps match a stored fp.
+    if comm -12 <(printf '%s\n' "${live}") <(printf '%s\n' "${stored}") | grep -q .; then
+        _HK_STATE="ok"
+    else
+        _HK_STATE="changed"
+    fi
+    return 0
+}
+
+# True if $1 (host) appears in the comma-separated --refresh-host-keys list.
+in_refresh_list() {
+    local host="$1" item; local -a parts
+    [[ -z "${REFRESH_HOST_KEYS}" ]] && return 1
+    IFS=',' read -ra parts <<<"${REFRESH_HOST_KEYS}"
+    for item in "${parts[@]}"; do [[ "$(_trim "${item}")" == "${host}" ]] && return 0; done
+    return 1
+}
+
+# If an --accept-key pin exists for $1 (host), echo its expected SHA256 fp; else nothing.
+pinned_fp_for() {
+    local host="$1" pair k v; local -a parts
+    [[ -z "${ACCEPT_KEYS}" ]] && return 1
+    IFS=',' read -ra parts <<<"${ACCEPT_KEYS}"
+    for pair in "${parts[@]}"; do
+        k=$(_trim "${pair%%=*}"); v=$(_trim "${pair#*=}")
+        [[ "${k}" == "${host}" ]] && { printf '%s' "${v}"; return 0; }
+    done
+    return 1
+}
+
+# Append a host-key change event to the audit log (best-effort).
+audit_hostkey() {  # host  old_fp  new_fp  action
+    local f="${LOG_DIR}/host-key-changes.log"
+    mkdir -p "${LOG_DIR}" 2>/dev/null || return 0
+    printf '%s  user=%s  host=%s  action=%s  old=%s  new=%s\n' \
+        "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${USER:-unknown}" "$1" "$4" "${2:-none}" "${3:-none}" \
+        >> "${f}" 2>/dev/null || true
+}
+
+# Remove a host's stale known_hosts entry so accept-new re-learns the current key.
+relearn_hostkey() { ssh-keygen -R "$1" >/dev/null 2>&1 || true; }
 
 # Parse one server entry into globals: _HOST _USER _PORT _KEY _PASSWORD
 # Accepts two formats:
@@ -669,6 +738,39 @@ deploy_one() {
         fi
     fi
 
+    # Host-key preflight: detect a CHANGED SSH host key (server rebuilt, or worse)
+    # and handle it per policy. Default = refuse and report; relearn only when the
+    # operator opted in (pin, explicit list, or interactive confirm).
+    hostkey_status "${_HOST}" "${_PORT}"
+    if [[ "${_HK_STATE}" == "changed" ]]; then
+        local relearn=false why="" pin=""
+        if pin=$(pinned_fp_for "${_HOST}"); then
+            if grep -qF "${pin}" <<<"${_HK_NEW}"; then
+                relearn=true; why="--accept-key pin matched"
+            else
+                con "${tag} SKIPPED: host key changed and does NOT match --accept-key pin (now ${_HK_NEW})"
+                audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "blocked:pin-mismatch"
+                return 4
+            fi
+        elif in_refresh_list "${_HOST}"; then
+            relearn=true; why="--refresh-host-keys"
+        elif [[ "${PARALLEL}" != "true" ]] && { : >/dev/tty; } 2>/dev/null; then
+            printf '\n[%s] SSH HOST KEY CHANGED\n  stored: %s\n  now:    %s\nRe-learn this host and continue? [y/N] ' \
+                "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" >/dev/tty
+            local ans=""; read -r ans </dev/tty || true
+            [[ "${ans}" =~ ^[Yy] ]] && { relearn=true; why="operator confirmed (interactive)"; }
+        fi
+        if [[ "${relearn}" == true ]]; then
+            con "${tag} host key changed — re-learning (${why})."
+            audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "relearn:${why}"
+            relearn_hostkey "${_HOST}"
+        else
+            con "${tag} SKIPPED: SSH host key changed (stored ${_HK_OLD} -> now ${_HK_NEW})"
+            audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "blocked"
+            return 4
+        fi
+    fi
+
     local stamp="${BASHPID:-$$}"
     local tmp_cert="/tmp/3cx_chain_${stamp}.pem"
     local tmp_key="/tmp/3cx_key_${stamp}.pem"
@@ -702,7 +804,8 @@ deploy_one() {
         *) con "${tag} FAILED (exit ${install_rc})"   ; return 1 ;;
     esac
 }
-# deploy_one return codes: 0 installed, 1 failed, 2 already-current, 3 FQDN mismatch
+# deploy_one return codes: 0 installed, 1 failed, 2 already-current,
+#                          3 FQDN mismatch, 4 SSH host key changed (blocked)
 
 # ---- deploy command ----------------------------------------------------------
 cmd_deploy() {
@@ -775,7 +878,7 @@ cmd_deploy() {
     local total=${#server_lines[@]}
     # Initialize as empty arrays (not just declared) so `${#arr[@]}` and
     # `"${arr[@]}"` are safe under `set -u` even when nothing gets appended.
-    local -a installed=() skipped=() mismatched=() failed=()
+    local -a installed=() skipped=() mismatched=() hostkey_changed=() failed=()
 
     con "Deploying to ${total} server(s)..."
 
@@ -797,6 +900,7 @@ cmd_deploy() {
                 0) installed+=("${hosts[$i]}") ;;
                 2) skipped+=("${hosts[$i]}") ;;
                 3) mismatched+=("${hosts[$i]}") ;;
+                4) hostkey_changed+=("${hosts[$i]}") ;;
                 *) failed+=("${hosts[$i]}") ;;
             esac
         done
@@ -810,6 +914,7 @@ cmd_deploy() {
                 0) installed+=("${_HOST}") ;;
                 2) skipped+=("${_HOST}") ;;
                 3) mismatched+=("${_HOST}") ;;
+                4) hostkey_changed+=("${_HOST}") ;;
                 *) failed+=("${_HOST}"); warn "Continuing to next server..." ;;
             esac
         done
@@ -822,15 +927,17 @@ cmd_deploy() {
     con "Already current     : ${#skipped[@]}"
     con "Failed              : ${#failed[@]}"
     (( ${#mismatched[@]} > 0 ))         && con "FQDN mismatch (skip) : ${#mismatched[@]}"
+    (( ${#hostkey_changed[@]} > 0 ))    && con "Host key changed (skip): ${#hostkey_changed[@]}"
     (( ${#SKIPPED_INCOMPLETE[@]} > 0 )) && con "Skipped (incomplete): ${#SKIPPED_INCOMPLETE[@]}"
     con ""
 
     con "$(printf '  %-50s %s' 'SERVER' 'STATUS')"
     con "$(printf '  %-50s %s' '------' '------')"
-    for h in "${installed[@]}";  do con "$(printf '  %-50s %s' "${h}" 'INSTALLED')"; done
-    for h in "${skipped[@]}";    do con "$(printf '  %-50s %s' "${h}" 'ALREADY CURRENT')"; done
-    for h in "${mismatched[@]}"; do con "$(printf '  %-50s %s' "${h}" 'SKIPPED (FQDN mismatch)')"; done
-    for h in "${failed[@]}";     do con "$(printf '  %-50s %s' "${h}" 'FAILED')"; done
+    for h in "${installed[@]}";       do con "$(printf '  %-50s %s' "${h}" 'INSTALLED')"; done
+    for h in "${skipped[@]}";         do con "$(printf '  %-50s %s' "${h}" 'ALREADY CURRENT')"; done
+    for h in "${mismatched[@]}";      do con "$(printf '  %-50s %s' "${h}" 'SKIPPED (FQDN mismatch)')"; done
+    for h in "${hostkey_changed[@]}"; do con "$(printf '  %-50s %s' "${h}" 'SKIPPED (host key changed)')"; done
+    for h in "${failed[@]}";          do con "$(printf '  %-50s %s' "${h}" 'FAILED')"; done
 
     # Servers that got NO cert — make each impossible to overlook.
     if (( ${#mismatched[@]} > 0 )); then
@@ -838,6 +945,17 @@ cmd_deploy() {
         con "WARNING: ${#mismatched[@]} server(s) were SKIPPED because the cert does not cover their FQDN:"
         for h in "${mismatched[@]}"; do con "  - ${h}"; done
         con "  These need a cert that matches their hostname, or re-run with --force if intentional."
+    fi
+
+    if (( ${#hostkey_changed[@]} > 0 )); then
+        local joined
+        printf -v joined '%s,' "${hostkey_changed[@]}"; joined="${joined%,}"
+        con ""
+        con "WARNING: ${#hostkey_changed[@]} server(s) were SKIPPED because their SSH host key CHANGED:"
+        for h in "${hostkey_changed[@]}"; do con "  - ${h}"; done
+        con "  Each server's stored vs. current fingerprint was printed above — verify those are"
+        con "  legitimate rebuilds (not a man-in-the-middle), then re-learn just these and re-run:"
+        con "    $0 deploy <cert> --key <key> --refresh-host-keys ${joined}"
     fi
 
     if (( ${#SKIPPED_INCOMPLETE[@]} > 0 )); then
@@ -959,6 +1077,37 @@ cmd_rollback() {
     fi
 }
 
+# ---- keyscan command ---------------------------------------------------------
+# Reports each server's stored vs. currently-presented SSH host-key fingerprint —
+# verify keys before a run or after a planned rebuild. No login needed (ssh-keyscan).
+cmd_keyscan() {
+    prepare_server_list 0
+    local -a server_lines=("${DEPLOY_LINES[@]}")
+    echo "SSH host-key status for ${#server_lines[@]} server(s):"
+    echo
+    local -a changed=()
+    for line in "${server_lines[@]}"; do
+        parse_server_line "${line}"
+        hostkey_status "${_HOST}" "${_PORT}"
+        case "${_HK_STATE}" in
+            ok)          printf '  %-50s OK (matches known_hosts)\n' "${_HOST}" ;;
+            new)         printf '  %-50s NEW (not in known_hosts) — now: %s\n' "${_HOST}" "${_HK_NEW}" ;;
+            unreachable) printf '  %-50s UNREACHABLE (port %s)\n' "${_HOST}" "${_PORT}" ;;
+            changed)     printf '  %-50s CHANGED\n      stored: %s\n      now:    %s\n' "${_HOST}" "${_HK_OLD}" "${_HK_NEW}"
+                         changed+=("${_HOST}") ;;
+        esac
+    done
+    echo
+    if (( ${#changed[@]} > 0 )); then
+        local joined; printf -v joined '%s,' "${changed[@]}"; joined="${joined%,}"
+        con "${#changed[@]} host(s) have a CHANGED key. After verifying those are legitimate,"
+        con "re-learn them on the next deploy with:  --refresh-host-keys ${joined}"
+        return 1
+    fi
+    con "All reachable hosts match known_hosts (or are new)."
+    return 0
+}
+
 # ---- verify command ----------------------------------------------------------
 # Checks what clients actually see: connects from this machine to each server's
 # public FQDN on each configured port (no SSH) — the vantage point of an external
@@ -1047,27 +1196,36 @@ Usage:
   $0 setup
   $0 csr      [--config FILE] [--key FILE]
   $0 deploy   <issued_chain.pem> [--config FILE] [--servers FILE] [--key FILE] [--parallel] [--force]
+                                 [--refresh-host-keys h1,h2] [--accept-key host=SHA256:..]
   $0 rollback [--config FILE] [--servers FILE]
   $0 verify   [--config FILE] [--servers FILE]
+  $0 keyscan  [--config FILE] [--servers FILE]
   $0 version
   $0 help
 
 Options:
-  --config FILE    Config file       (default: cert.conf)
-  --servers FILE   Server list       (default: servers.txt)
-  --key FILE       Private key — for csr: use existing key instead of generating one
-                                — for deploy: use instead of OUTPUT_DIR/KEY_FILENAME
-  --log FILE       Write full output to FILE (default: logs/<action>_YYYYMMDD_HHMMSS.log)
-  --no-log         Disable log file
-  --parallel       Deploy to all servers concurrently
-  --force          Install even if the cert does not cover the server's FQDN
-  --no-strict      Skip SSH host key verification (not recommended)
+  --config FILE         Config file       (default: cert.conf)
+  --servers FILE        Server list       (default: servers.txt)
+  --key FILE            Private key — for csr: use existing key instead of generating one
+                                     — for deploy: use instead of OUTPUT_DIR/KEY_FILENAME
+  --log FILE            Write full output to FILE (default: logs/<action>_YYYYMMDD_HHMMSS.log)
+  --no-log              Disable log file
+  --parallel            Deploy to all servers concurrently
+  --force               Install even if the cert does not cover the server's FQDN
+  --refresh-host-keys L Re-learn the changed SSH host key for the named hosts (comma list)
+  --accept-key H=FP     Re-learn host H only if its live key matches fingerprint FP (repeatable)
+  --no-strict           Skip SSH host key verification (not recommended)
 
 deploy skips any server whose FQDN the cert does not cover (CN/SAN, wildcard-aware),
 so a wildcard for one domain is never installed on a server in another. Override
 with --force. rollback restores the cert+key that deploy archived (the .YYYY copies).
 verify flags certs that are expired, expiring within VERIFY_EXPIRY_WARN_DAYS, or
 don't match the hostname, and exits non-zero if any server has a problem.
+
+If a server's SSH host key has CHANGED (e.g. it was rebuilt), deploy refuses it by
+default and prints stored vs. current fingerprints. After verifying, re-learn just
+those hosts with --refresh-host-keys (or, in a terminal, confirm the interactive
+prompt). keyscan reports stored-vs-current host-key fingerprints without deploying.
 
 Key/cert formats accepted: PEM (RSA/PKCS#8/EC, encrypted or not), DER, PKCS#12 (.p12/.pfx)
 Inputs are automatically normalized to unencrypted PEM before deployment.
@@ -1098,6 +1256,7 @@ _run() {
         deploy)   cmd_deploy "${POSITIONAL[0]:-}" ;;
         rollback) cmd_rollback ;;
         verify)   cmd_verify ;;
+        keyscan)  cmd_keyscan ;;
     esac
 }
 
@@ -1131,6 +1290,8 @@ main() {
             --no-log)    LOG_FILE="none";   shift   ;;
             --parallel)  PARALLEL=true;     shift   ;;
             --force)     FORCE=true;        shift   ;;
+            --refresh-host-keys) need_arg "$@"; REFRESH_HOST_KEYS="$2"; shift 2 ;;
+            --accept-key)        need_arg "$@"; ACCEPT_KEYS="${ACCEPT_KEYS:+${ACCEPT_KEYS},}$2"; shift 2 ;;
             --no-strict) SSH_STRICT="no";   shift   ;;
             --*)         die "Unknown option: $1" ;;
             *)           POSITIONAL+=("$1"); shift  ;;
@@ -1141,7 +1302,7 @@ main() {
     [[ "${ACTION}" != "setup" ]] && load_config
 
     # Resolve the log file path once (shared by both logging styles below).
-    if [[ "${ACTION}" =~ ^(setup|csr|deploy|rollback|verify)$ && "${LOG_FILE}" != "none" ]]; then
+    if [[ "${ACTION}" =~ ^(setup|csr|deploy|rollback|verify|keyscan)$ && "${LOG_FILE}" != "none" ]]; then
         if [[ -z "${LOG_FILE}" ]]; then
             mkdir -p "${LOG_DIR}"
             LOG_FILE="${LOG_DIR}/${ACTION}_$(date +%Y%m%d_%H%M%S).log"
@@ -1165,7 +1326,7 @@ main() {
             fi
             _run
             ;;
-        setup|csr|verify)
+        setup|csr|verify|keyscan)
             # Concise commands: show everything on the console, and also record it.
             if [[ "${LOG_FILE}" != "none" ]]; then
                 printf 'Logging to: %s\n\n' "${LOG_FILE}" | tee -a "${LOG_FILE}"

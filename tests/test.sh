@@ -44,6 +44,23 @@ fi
 rm -rf "${tmpd}"
 
 echo
+echo "== --refresh-host-keys list membership =="
+REFRESH_HOST_KEYS="a.example.com, b.example.com,c.example.com"
+if in_refresh_list a.example.com; then ok "in_refresh_list matches first"; else no "should match a.example.com"; fi
+if in_refresh_list b.example.com; then ok "in_refresh_list trims spaces"; else no "should match b.example.com (spaced)"; fi
+if in_refresh_list z.example.com; then no "should NOT match z.example.com"; else ok "in_refresh_list rejects non-member"; fi
+REFRESH_HOST_KEYS=""
+if in_refresh_list a.example.com; then no "empty list should match nothing"; else ok "in_refresh_list empty -> no match"; fi
+
+echo
+echo "== --accept-key pin lookup =="
+ACCEPT_KEYS="a.example.com=SHA256:AAA,b.example.com=SHA256:BBB"
+[[ "$(pinned_fp_for a.example.com 2>/dev/null)" == "SHA256:AAA" ]] && ok "pinned_fp_for returns a's fp" || no "pinned_fp_for a.example.com"
+[[ "$(pinned_fp_for b.example.com 2>/dev/null)" == "SHA256:BBB" ]] && ok "pinned_fp_for returns b's fp" || no "pinned_fp_for b.example.com"
+if pinned_fp_for c.example.com >/dev/null 2>&1; then no "c has no pin"; else ok "pinned_fp_for rejects unpinned host"; fi
+ACCEPT_KEYS=""
+
+echo
 echo "== smoke: version command =="
 ver="$(bash "${SCRIPT}" version)"
 case "${ver}" in

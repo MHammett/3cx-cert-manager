@@ -8,6 +8,32 @@ All notable changes to this project are documented here. The format is based on
 
 _Nothing yet._
 
+## [1.1.0] — 2026-06-11
+
+### Added
+
+- **Changed-SSH-host-key handling.** When a server's host key has changed (e.g. it
+  was rebuilt), `deploy` now detects it up front, refuses by default, and reports the
+  stored vs. current SHA256 fingerprints — instead of a raw `scp` failure. Re-learn is
+  opt-in and per-server:
+  - `--refresh-host-keys host1,host2` — re-learn only the named hosts (non-interactive).
+  - `--accept-key host=SHA256:…` — re-learn a host only if its live key matches the
+    given fingerprint (repeatable; safest, verify out-of-band first).
+  - Interactive per-host `[y/N]` prompt (shown on the controlling terminal) when run
+    in a serial session at a real terminal.
+  - The deploy summary lists changed-key hosts and prints a ready-to-paste
+    `--refresh-host-keys` command scoped to exactly those hosts.
+- **`keyscan` command** — report each server's stored-vs-current SSH host-key
+  fingerprint without deploying; useful before a run or after a planned rebuild.
+- **Host-key audit log** — re-learns and blocks are appended to
+  `logs/host-key-changes.log` (host, old/new fingerprint, action, timestamp, user).
+
+### Notes
+
+- The safe default is unchanged: a changed host key is never accepted silently or
+  blanket — you must opt in per server. This preserves the man-in-the-middle
+  protection while making legitimate rebuilds a one-flag re-run.
+
 ## [1.0.0] — 2026-06-08
 
 Initial release. A single-script bash tool for renewing wildcard SSL certificates
@@ -51,5 +77,6 @@ across one or many 3CX v20 PBX servers, run entirely from the local machine.
 - **Tests + CI** — `tests/test.sh` unit-tests the wildcard matcher and cert-coverage
   logic; GitHub Actions runs shellcheck, a syntax check, and the tests on every push.
 
-[Unreleased]: https://github.com/MHammett/3cx-cert-manager/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/MHammett/3cx-cert-manager/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/MHammett/3cx-cert-manager/releases/tag/v1.1.0
 [1.0.0]: https://github.com/MHammett/3cx-cert-manager/releases/tag/v1.0.0

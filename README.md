@@ -7,6 +7,8 @@ with nothing to install on the servers.
 - Key-based **or** password-based SSH auth, configurable per server
 - Accepts keys/certs in any common format (PEM, DER, PKCS#12, PKCS#7) and normalizes them
 - **Won't install a cert on a server whose hostname it doesn't cover** (FQDN guard)
+- **Refuses a changed SSH host key by default** (rebuilt server / MITM signal); opt-in
+  per-host re-learn via `--refresh-host-keys` / `--accept-key`, plus a `keyscan` command
 - Warns on an **incomplete chain** (leaf without intermediates) before installing
 - Idempotent — re-running skips servers already on the new cert
 - Archives the cert it replaces, with a one-command **rollback**
@@ -259,6 +261,15 @@ not a failure. `verify` **exits non-zero if any server has a problem** — not c
 on any port, expired, expiring soon, or name-mismatched — so you can run it on a
 schedule (cron) as a fleet health check and get alerted before a cert lapses.
 
+### `keyscan`
+```bash
+./3cx_cert_manager.sh keyscan [--servers FILE]
+```
+Reports each server's **stored vs. current SSH host-key fingerprint** (via
+`ssh-keyscan`, no login needed) — `OK`, `NEW`, `CHANGED` (shows both fingerprints), or
+`UNREACHABLE`. Use it to verify host keys before a run, or after a planned rebuild.
+Exits non-zero if any host's key has changed.
+
 ### `version` / `help`
 ```bash
 ./3cx_cert_manager.sh version      # or --version, -V
@@ -278,6 +289,8 @@ any config.
 | `--key FILE` | csr, deploy | `certs/wildcard.key` | Private key. csr: use instead of generating one. deploy: use instead of the managed key. |
 | `--parallel` | deploy | off | Deploy concurrently. Output interleaves; **serial is recommended** (~6s/server). |
 | `--force` | deploy | off | Install even if the cert doesn't cover the server's FQDN |
+| `--refresh-host-keys L` | deploy | — | Re-learn the changed SSH host key for the named hosts (comma list) |
+| `--accept-key H=FP` | deploy | — | Re-learn host H only if its live key matches fingerprint FP (repeatable) |
 | `--log FILE` | all | `logs/<action>_<timestamp>.log` | Log file path |
 | `--no-log` | all | off | Disable the log file |
 | `--no-strict` | deploy, rollback, verify | off | Skip SSH host-key verification — not recommended |
@@ -345,6 +358,20 @@ reload was skipped and the **previous cert is still live**. SSH in and run `ngin
 for the detail (common causes: wrong chain order, key/cert mismatch, truncated file).
 
 **A server got the wrong cert.** Use `rollback` to restore the archived pair.
+
+**`SKIPPED (host key changed)` / `REMOTE HOST IDENTIFICATION HAS CHANGED`.** That
+server's SSH host key differs from what's in `known_hosts` — usually because it was
+rebuilt, but it's also the signal of a man-in-the-middle, so the tool refuses it by
+default and prints the stored vs. current fingerprints. Verify the new key is a
+legitimate rebuild (compare against the provider/console, or run `keyscan`), then
+re-learn just those hosts and re-run:
+```bash
+./3cx_cert_manager.sh deploy <cert> --key <key> --refresh-host-keys host1,host2
+```
+For stricter control, `--accept-key host=SHA256:…` re-learns only if the live key
+matches a fingerprint you verified out-of-band. In an interactive terminal (serial),
+deploy also offers a per-host `[y/N]` prompt. Re-learns are recorded in
+`logs/host-key-changes.log`.
 
 **`mapfile: command not found` (macOS).** macOS ships bash 3.2. `brew install bash` and
 run via `/opt/homebrew/bin/bash 3cx_cert_manager.sh …`.
