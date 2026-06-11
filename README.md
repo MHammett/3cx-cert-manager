@@ -226,14 +226,22 @@ Generates a CSR in `certs/` and prints it for submission to your CA.
 
 ### `deploy`
 ```bash
-./3cx_cert_manager.sh deploy <issued_chain.pem> [--key FILE] [--servers FILE] [--parallel] [--force]
+./3cx_cert_manager.sh deploy <issued_chain.pem> [--key FILE] [--servers FILE] [--parallel] [--force] [--only h1,h2]
 ```
 Normalizes the key/cert, then rolls the cert out across the server list (see
 [How it works](#how-it-works)). Skips servers whose FQDN the cert doesn't cover
 (`--force` to override) and servers already on the new cert. Verbose detail goes to
 the log; the console shows progress + a summary.
 
-To retry only certain servers, point `--servers` at a file containing just those hosts.
+To retry only certain servers, add `--only host1,host2` — it narrows the run to that
+subset of your existing server list (credentials still come from the list, so nothing
+sensitive goes on the command line). Works with `verify`, `rollback`, and `keyscan` too:
+
+```bash
+# Re-run just the two servers a previous run couldn't reach:
+./3cx_cert_manager.sh deploy <issued_chain.pem> --key <key> \
+  --only 3cx-a.pbx.example.com,3cx-b.pbx.example.com
+```
 
 ### `rollback`
 ```bash
@@ -285,7 +293,8 @@ any config.
 | Flag | Applies to | Default | Description |
 |------|-----------|---------|-------------|
 | `--config FILE` | all | `cert.conf` | Config file path |
-| `--servers FILE` | deploy, rollback, verify | `servers.txt` | Server list path |
+| `--servers FILE` | deploy, rollback, verify, keyscan | `servers.txt` | Server list path |
+| `--only h1,h2` | deploy, rollback, verify, keyscan | — | Restrict the run to this subset of the server list (creds still come from the list) |
 | `--key FILE` | csr, deploy | `certs/wildcard.key` | Private key. csr: use instead of generating one. deploy: use instead of the managed key. |
 | `--parallel` | deploy | off | Deploy concurrently. Output interleaves; **serial is recommended** (~6s/server). |
 | `--force` | deploy | off | Install even if the cert doesn't cover the server's FQDN |

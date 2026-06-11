@@ -63,6 +63,36 @@ if pinned_fp_for c.example.com >/dev/null 2>&1; then no "c has no pin"; else ok 
 ACCEPT_KEYS=""
 
 echo
+echo "== --only subset filter (prepare_server_list) =="
+# Fake server list with three hosts; --only should narrow DEPLOY_LINES to the named
+# subset while keeping each line's credentials (which come from the list, not the CLI).
+onlyd="$(mktemp -d)"
+cat > "${onlyd}/servers.txt" <<'EOF'
+a.pbx.example.com,root,pw-a
+b.pbx.example.com,root,pw-b
+c.pbx.example.com,root,pw-c
+EOF
+# export so shellcheck doesn't flag SC2034 (it can't trace use across `source`)
+export SERVERS_FILE="${onlyd}/servers.txt"
+export PREPARE_QUIET=true
+export ONLY="a.pbx.example.com,c.pbx.example.com"
+prepare_server_list 1
+if [[ "${#DEPLOY_LINES[@]}" -eq 2 ]]; then ok "--only narrowed 3 -> 2"; else no "--only expected 2 lines, got ${#DEPLOY_LINES[@]}"; fi
+case " ${DEPLOY_LINES[*]} " in
+    *a.pbx.example.com*) : ;;  *) no "--only dropped a.pbx.example.com" ;;
+esac
+case " ${DEPLOY_LINES[*]} " in
+    *b.pbx.example.com*) no "--only should have dropped b.pbx.example.com" ;;  *) ok "--only excluded b" ;;
+esac
+case " ${DEPLOY_LINES[*]} " in
+    *pw-a*) ok "--only kept credentials from the list" ;;  *) no "--only lost credentials" ;;
+esac
+ONLY=""
+PREPARE_QUIET=false
+SERVERS_FILE="servers.txt"
+rm -rf "${onlyd}"
+
+echo
 echo "== smoke: version command =="
 ver="$(bash "${SCRIPT}" version)"
 case "${ver}" in

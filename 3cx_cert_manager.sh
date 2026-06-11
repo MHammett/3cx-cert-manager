@@ -28,7 +28,7 @@ set -euo pipefail
 # permission-less mounts like /mnt/c under WSL.
 umask 077
 
-VERSION="1.1.1"
+VERSION="1.2.0"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -61,6 +61,7 @@ PARALLEL=false
 FORCE=false   # --force: install even if the cert doesn't cover the server's FQDN
 KEY_FILE=""   # explicit key path; defaults to OUTPUT_DIR/KEY_FILENAME after config loads
 LOG_FILE=""   # auto-generated under LOG_DIR if not set; "none" to disable
+ONLY=""               # --only: comma-separated hostnames; restrict the run to this subset of the server list
 REFRESH_HOST_KEYS=""  # --refresh-host-keys: comma-separated hosts whose changed SSH key to relearn
 ACCEPT_KEYS=""        # --accept-key host=SHA256:..  (comma-separated) — relearn only if live key matches
 CONSOLE_FD=1  # 1 normally; becomes 3 (saved console) when full output is redirected to a log
@@ -232,6 +233,35 @@ prepare_server_list() {
         seen["${_HOST}"]=1
         DEPLOY_LINES+=("${line}")
     done
+
+    # --only: restrict to the named subset of the list (credentials still come from
+    # the server list, so nothing sensitive is typed on the command line). Hosts named
+    # in --only but absent from the list are warned about, not silently ignored.
+    if [[ -n "${ONLY}" ]]; then
+        local -a want_arr filtered=()
+        local -A want=() matched=()
+        IFS=',' read -ra want_arr <<< "${ONLY}"
+        local w
+        for w in "${want_arr[@]}"; do
+            w="$(_trim "${w}")"
+            [[ -n "${w}" ]] && want["${w}"]=1
+        done
+        for line in "${DEPLOY_LINES[@]}"; do
+            parse_server_line "${line}"
+            if [[ -n "${want[${_HOST}]:-}" ]]; then
+                filtered+=("${line}")
+                matched["${_HOST}"]=1
+            fi
+        done
+        if [[ "${PREPARE_QUIET}" != "true" ]]; then
+            local k
+            for k in "${!want[@]}"; do
+                [[ -z "${matched[${k}]:-}" ]] && warn "--only host not found in ${SERVERS_FILE} (ignored): ${k}"
+            done
+        fi
+        DEPLOY_LINES=("${filtered[@]}")
+        (( ${#DEPLOY_LINES[@]} > 0 )) || die "None of the --only hosts matched an entry in ${SERVERS_FILE}."
+    fi
 
     if [[ "${PREPARE_QUIET}" != "true" ]]; then
         if (( ${#dups[@]} > 0 )); then
@@ -1210,10 +1240,10 @@ Usage:
   $0 setup
   $0 csr      [--config FILE] [--key FILE]
   $0 deploy   <issued_chain.pem> [--config FILE] [--servers FILE] [--key FILE] [--parallel] [--force]
-                                 [--refresh-host-keys h1,h2] [--accept-key host=SHA256:..]
-  $0 rollback [--config FILE] [--servers FILE]
-  $0 verify   [--config FILE] [--servers FILE]
-  $0 keyscan  [--config FILE] [--servers FILE]
+                                 [--only h1,h2] [--refresh-host-keys h1,h2] [--accept-key host=SHA256:..]
+  $0 rollback [--config FILE] [--servers FILE] [--only h1,h2]
+  $0 verify   [--config FILE] [--servers FILE] [--only h1,h2]
+  $0 keyscan  [--config FILE] [--servers FILE] [--only h1,h2]
   $0 version
   $0 help
 
@@ -1225,6 +1255,8 @@ Options:
   --log FILE            Write full output to FILE (default: logs/<action>_YYYYMMDD_HHMMSS.log)
   --no-log              Disable log file
   --parallel            Deploy to all servers concurrently
+  --only h1,h2          Restrict the run to this subset of the server list (creds still
+                        come from the list — no credentials on the command line)
   --force               Install even if the cert does not cover the server's FQDN
   --refresh-host-keys L Re-learn the changed SSH host key for the named hosts (comma list)
   --accept-key H=FP     Re-learn host H only if its live key matches fingerprint FP (repeatable)
@@ -1304,6 +1336,7 @@ main() {
             --no-log)    LOG_FILE="none";   shift   ;;
             --parallel)  PARALLEL=true;     shift   ;;
             --force)     FORCE=true;        shift   ;;
+            --only) need_arg "$@"; ONLY="$2"; shift 2 ;;
             --refresh-host-keys) need_arg "$@"; REFRESH_HOST_KEYS="$2"; shift 2 ;;
             --accept-key)        need_arg "$@"; ACCEPT_KEYS="${ACCEPT_KEYS:+${ACCEPT_KEYS},}$2"; shift 2 ;;
             --no-strict) SSH_STRICT="no";   shift   ;;

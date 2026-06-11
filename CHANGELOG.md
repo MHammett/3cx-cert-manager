@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format is based on
 
 _Nothing yet._
 
+## [1.2.0] — 2026-06-11
+
+### Added
+
+- **`--only h1,h2`** — restrict any list-driven command (`deploy`, `verify`, `rollback`,
+  `keyscan`) to a named subset of the server list, without writing a throwaway file.
+  Credentials still come from the server list, so nothing sensitive is typed on the
+  command line. Hosts named in `--only` but absent from the list are warned about, not
+  silently ignored. Intended for targeted re-runs (e.g. retrying the handful of servers
+  a previous run couldn't reach).
+
 ## [1.1.1] — 2026-06-11
 
 ### Fixed
@@ -89,7 +100,8 @@ across one or many 3CX v20 PBX servers, run entirely from the local machine.
 - **Tests + CI** — `tests/test.sh` unit-tests the wildcard matcher and cert-coverage
   logic; GitHub Actions runs shellcheck, a syntax check, and the tests on every push.
 
-[Unreleased]: https://github.com/MHammett/3cx-cert-manager/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/MHammett/3cx-cert-manager/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/MHammett/3cx-cert-manager/releases/tag/v1.2.0
 [1.1.1]: https://github.com/MHammett/3cx-cert-manager/releases/tag/v1.1.1
 [1.1.0]: https://github.com/MHammett/3cx-cert-manager/releases/tag/v1.1.0
 [1.0.0]: https://github.com/MHammett/3cx-cert-manager/releases/tag/v1.0.0
