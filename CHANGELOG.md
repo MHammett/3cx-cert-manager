@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format is based on
 
 _Nothing yet._
 
+## [1.1.1] — 2026-06-11
+
+### Fixed
+
+- **`--refresh-host-keys` now actually re-learns the listed hosts.** In 1.1.0 the
+  re-learn was gated behind `ssh-keyscan`-based change detection, which can fail
+  (e.g. report "unreachable") even when the host is reachable — so an explicitly
+  listed host could still fail with the raw "host key changed" error. Explicitly
+  listed hosts are now re-learned **unconditionally before connecting**, independent
+  of detection. Detection still drives the default report, the `--accept-key` pin, and
+  the interactive prompt for hosts that aren't explicitly listed.
+
 ## [1.1.0] — 2026-06-11
 
 ### Added
@@ -77,6 +89,7 @@ across one or many 3CX v20 PBX servers, run entirely from the local machine.
 - **Tests + CI** — `tests/test.sh` unit-tests the wildcard matcher and cert-coverage
   logic; GitHub Actions runs shellcheck, a syntax check, and the tests on every push.
 
-[Unreleased]: https://github.com/MHammett/3cx-cert-manager/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/MHammett/3cx-cert-manager/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/MHammett/3cx-cert-manager/releases/tag/v1.1.1
 [1.1.0]: https://github.com/MHammett/3cx-cert-manager/releases/tag/v1.1.0
 [1.0.0]: https://github.com/MHammett/3cx-cert-manager/releases/tag/v1.0.0

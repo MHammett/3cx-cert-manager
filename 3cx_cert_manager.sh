@@ -28,7 +28,7 @@ set -euo pipefail
 # permission-less mounts like /mnt/c under WSL.
 umask 077
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -741,33 +741,47 @@ deploy_one() {
     # Host-key preflight: detect a CHANGED SSH host key (server rebuilt, or worse)
     # and handle it per policy. Default = refuse and report; relearn only when the
     # operator opted in (pin, explicit list, or interactive confirm).
-    hostkey_status "${_HOST}" "${_PORT}"
-    if [[ "${_HK_STATE}" == "changed" ]]; then
-        local relearn=false why="" pin=""
-        if pin=$(pinned_fp_for "${_HOST}"); then
-            if grep -qF "${pin}" <<<"${_HK_NEW}"; then
-                relearn=true; why="--accept-key pin matched"
+    if in_refresh_list "${_HOST}"; then
+        # Explicit operator opt-in: re-learn unconditionally, BEFORE connecting.
+        # Deterministic — does not depend on ssh-keyscan detection (which can be
+        # flaky). ssh-keygen -R drops the stale entry; accept-new re-adds the
+        # current key on the upload below. Harmless if the key hadn't changed.
+        con "${tag} re-learning SSH host key (--refresh-host-keys)."
+        audit_hostkey "${_HOST}" "(per --refresh-host-keys)" "(re-learned on connect)" "relearn:list"
+        relearn_hostkey "${_HOST}"
+    else
+        # Otherwise detect a CHANGED key and handle per policy (pin / prompt / block).
+        hostkey_status "${_HOST}" "${_PORT}"
+        if [[ "${_HK_STATE}" == "changed" ]]; then
+            local pin=""
+            if pin=$(pinned_fp_for "${_HOST}"); then
+                if grep -qF "${pin}" <<<"${_HK_NEW}"; then
+                    con "${tag} host key changed — re-learning (--accept-key pin matched)."
+                    audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "relearn:pin"
+                    relearn_hostkey "${_HOST}"
+                else
+                    con "${tag} SKIPPED: host key changed and does NOT match --accept-key pin (now ${_HK_NEW})"
+                    audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "blocked:pin-mismatch"
+                    return 4
+                fi
+            elif [[ "${PARALLEL}" != "true" ]] && { : >/dev/tty; } 2>/dev/null; then
+                printf '\n[%s] SSH HOST KEY CHANGED\n  stored: %s\n  now:    %s\nRe-learn this host and continue? [y/N] ' \
+                    "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" >/dev/tty
+                local ans=""; read -r ans </dev/tty || true
+                if [[ "${ans}" =~ ^[Yy] ]]; then
+                    con "${tag} re-learning (operator confirmed)."
+                    audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "relearn:interactive"
+                    relearn_hostkey "${_HOST}"
+                else
+                    con "${tag} SKIPPED: SSH host key changed (declined)"
+                    audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "blocked:declined"
+                    return 4
+                fi
             else
-                con "${tag} SKIPPED: host key changed and does NOT match --accept-key pin (now ${_HK_NEW})"
-                audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "blocked:pin-mismatch"
+                con "${tag} SKIPPED: SSH host key changed (stored ${_HK_OLD} -> now ${_HK_NEW}); verify, then --refresh-host-keys"
+                audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "blocked"
                 return 4
             fi
-        elif in_refresh_list "${_HOST}"; then
-            relearn=true; why="--refresh-host-keys"
-        elif [[ "${PARALLEL}" != "true" ]] && { : >/dev/tty; } 2>/dev/null; then
-            printf '\n[%s] SSH HOST KEY CHANGED\n  stored: %s\n  now:    %s\nRe-learn this host and continue? [y/N] ' \
-                "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" >/dev/tty
-            local ans=""; read -r ans </dev/tty || true
-            [[ "${ans}" =~ ^[Yy] ]] && { relearn=true; why="operator confirmed (interactive)"; }
-        fi
-        if [[ "${relearn}" == true ]]; then
-            con "${tag} host key changed — re-learning (${why})."
-            audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "relearn:${why}"
-            relearn_hostkey "${_HOST}"
-        else
-            con "${tag} SKIPPED: SSH host key changed (stored ${_HK_OLD} -> now ${_HK_NEW})"
-            audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "blocked"
-            return 4
         fi
     fi
 
