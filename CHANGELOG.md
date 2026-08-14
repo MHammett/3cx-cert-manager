@@ -6,7 +6,22 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **`deploy` no longer scans every host's SSH key up front.** Since v1.1.0, `deploy`
+  ran a proactive `ssh-keyscan` against every host in `hostkey_status` before
+  connecting, roughly doubling SSH connection volume per run (keyscan + scp/ssh) —
+  including uploads to hosts already on the current cert. On a large fleet this
+  increased exposure to fail2ban bans (confirmed cause of a multi-host outage during
+  a 2026-06-11 fleet renewal). `deploy` now attempts the `scp` it needed anyway and
+  only reacts if that upload itself reports a changed host key (`REMOTE HOST
+  IDENTIFICATION HAS CHANGED` / `Host key verification failed`) — at that point it
+  lazily fetches fingerprints for the single offending host to drive the existing
+  pin / interactive-prompt / block-and-report policy, then retries once if the key
+  was re-learned. Healthy hosts now cost exactly one SSH connection per run instead
+  of two. `--refresh-host-keys` behavior is unchanged (still re-learns up front,
+  locally, no network). The standalone `keyscan` command is unaffected — it's still
+  an explicit, opt-in scan of every host. (#2)
 
 ## [1.2.0] — 2026-06-11
 

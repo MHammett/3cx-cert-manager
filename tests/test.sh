@@ -93,6 +93,19 @@ SERVERS_FILE="servers.txt"
 rm -rf "${onlyd}"
 
 echo
+echo "== is_hostkey_error (stderr classifier) =="
+changed_msg='@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!
+Host key verification failed.'
+if is_hostkey_error "${changed_msg}"; then ok "detects REMOTE HOST IDENTIFICATION HAS CHANGED"; else no "should detect changed-key banner"; fi
+if is_hostkey_error "Host key verification failed."; then ok "detects bare 'Host key verification failed'"; else no "should detect bare host-key-verification failure"; fi
+if is_hostkey_error "ssh: connect to host pbx.example.com port 22: Connection refused"; then no "connection refused is NOT a host-key error"; else ok "does not flag connection refused"; fi
+if is_hostkey_error "Permission denied (publickey)."; then no "auth failure is NOT a host-key error"; else ok "does not flag auth failure"; fi
+if is_hostkey_error ""; then no "empty stderr is NOT a host-key error"; else ok "does not flag empty stderr"; fi
+
+echo
 echo "== smoke: version command =="
 ver="$(bash "${SCRIPT}" version)"
 case "${ver}" in

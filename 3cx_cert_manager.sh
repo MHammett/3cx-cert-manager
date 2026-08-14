@@ -398,6 +398,52 @@ audit_hostkey() {  # host  old_fp  new_fp  action
 # Remove a host's stale known_hosts entry so accept-new re-learns the current key.
 relearn_hostkey() { ssh-keygen -R "$1" >/dev/null 2>&1 || true; }
 
+# True if $1 (captured scp/ssh stderr) is a changed-host-key refusal rather than
+# some other failure (auth, network, disk, etc). Pure/stateless so it's unit-testable.
+is_hostkey_error() {
+    grep -qE 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed' <<<"$1"
+}
+
+# Called only after scp has actually refused a host on a changed-key error (i.e.
+# is_hostkey_error matched). Fetches live fingerprints now (lazy ssh-keyscan — the
+# one network round-trip this costs is confined to the single offending host) to
+# drive the same pin / interactive / block policy deploy_one used to apply
+# up front for every host. Returns 0 if the key was re-learned (caller may retry
+# the scp), 1 if blocked (caller should give up on this host, rc 4).
+handle_changed_hostkey() {
+    local host="$1" port="$2" tag="$3"
+    hostkey_status "${host}" "${port}"
+    local pin=""
+    if pin=$(pinned_fp_for "${host}"); then
+        if grep -qF "${pin}" <<<"${_HK_NEW}"; then
+            con "${tag} host key changed — re-learning (--accept-key pin matched)."
+            audit_hostkey "${host}" "${_HK_OLD}" "${_HK_NEW}" "relearn:pin"
+            relearn_hostkey "${host}"
+            return 0
+        fi
+        con "${tag} SKIPPED: host key changed and does NOT match --accept-key pin (now ${_HK_NEW})"
+        audit_hostkey "${host}" "${_HK_OLD}" "${_HK_NEW}" "blocked:pin-mismatch"
+        return 1
+    elif [[ "${PARALLEL}" != "true" ]] && { : >/dev/tty; } 2>/dev/null; then
+        printf '\n[%s] SSH HOST KEY CHANGED\n  stored: %s\n  now:    %s\nRe-learn this host and continue? [y/N] ' \
+            "${host}" "${_HK_OLD}" "${_HK_NEW}" >/dev/tty
+        local ans=""; read -r ans </dev/tty || true
+        if [[ "${ans}" =~ ^[Yy] ]]; then
+            con "${tag} re-learning (operator confirmed)."
+            audit_hostkey "${host}" "${_HK_OLD}" "${_HK_NEW}" "relearn:interactive"
+            relearn_hostkey "${host}"
+            return 0
+        fi
+        con "${tag} SKIPPED: SSH host key changed (declined)"
+        audit_hostkey "${host}" "${_HK_OLD}" "${_HK_NEW}" "blocked:declined"
+        return 1
+    else
+        con "${tag} SKIPPED: SSH host key changed (stored ${_HK_OLD} -> now ${_HK_NEW}); verify, then --refresh-host-keys"
+        audit_hostkey "${host}" "${_HK_OLD}" "${_HK_NEW}" "blocked"
+        return 1
+    fi
+}
+
 # Parse one server entry into globals: _HOST _USER _PORT _KEY _PASSWORD
 # Accepts two formats:
 #   CSV:       fqdn,username,password[,port[,keyfile]]
@@ -768,9 +814,14 @@ deploy_one() {
         fi
     fi
 
-    # Host-key preflight: detect a CHANGED SSH host key (server rebuilt, or worse)
-    # and handle it per policy. Default = refuse and report; relearn only when the
-    # operator opted in (pin, explicit list, or interactive confirm).
+    # Host-key handling: a CHANGED SSH host key (server rebuilt, or worse) is
+    # refused by default; relearn only when the operator opted in (pin, explicit
+    # list, or interactive confirm). We no longer scan every host up front to
+    # detect this — that doubled SSH connection volume on every run (keyscan +
+    # scp/ssh) even for the common case of a host whose key hasn't changed, which
+    # on a large fleet is exactly what trips fail2ban. Instead we let the scp below
+    # make the one connection we needed anyway, and only react if IT reports a
+    # changed key — see the is_hostkey_error branch after the upload attempt.
     if in_refresh_list "${_HOST}"; then
         # Explicit operator opt-in: re-learn unconditionally, BEFORE connecting.
         # Deterministic — does not depend on ssh-keyscan detection (which can be
@@ -779,40 +830,6 @@ deploy_one() {
         con "${tag} re-learning SSH host key (--refresh-host-keys)."
         audit_hostkey "${_HOST}" "(per --refresh-host-keys)" "(re-learned on connect)" "relearn:list"
         relearn_hostkey "${_HOST}"
-    else
-        # Otherwise detect a CHANGED key and handle per policy (pin / prompt / block).
-        hostkey_status "${_HOST}" "${_PORT}"
-        if [[ "${_HK_STATE}" == "changed" ]]; then
-            local pin=""
-            if pin=$(pinned_fp_for "${_HOST}"); then
-                if grep -qF "${pin}" <<<"${_HK_NEW}"; then
-                    con "${tag} host key changed — re-learning (--accept-key pin matched)."
-                    audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "relearn:pin"
-                    relearn_hostkey "${_HOST}"
-                else
-                    con "${tag} SKIPPED: host key changed and does NOT match --accept-key pin (now ${_HK_NEW})"
-                    audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "blocked:pin-mismatch"
-                    return 4
-                fi
-            elif [[ "${PARALLEL}" != "true" ]] && { : >/dev/tty; } 2>/dev/null; then
-                printf '\n[%s] SSH HOST KEY CHANGED\n  stored: %s\n  now:    %s\nRe-learn this host and continue? [y/N] ' \
-                    "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" >/dev/tty
-                local ans=""; read -r ans </dev/tty || true
-                if [[ "${ans}" =~ ^[Yy] ]]; then
-                    con "${tag} re-learning (operator confirmed)."
-                    audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "relearn:interactive"
-                    relearn_hostkey "${_HOST}"
-                else
-                    con "${tag} SKIPPED: SSH host key changed (declined)"
-                    audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "blocked:declined"
-                    return 4
-                fi
-            else
-                con "${tag} SKIPPED: SSH host key changed (stored ${_HK_OLD} -> now ${_HK_NEW}); verify, then --refresh-host-keys"
-                audit_hostkey "${_HOST}" "${_HK_OLD}" "${_HK_NEW}" "blocked"
-                return 4
-            fi
-        fi
     fi
 
     local stamp="${BASHPID:-$$}"
@@ -820,8 +837,21 @@ deploy_one() {
     local tmp_key="/tmp/3cx_key_${stamp}.pem"
 
     echo "${tag} Uploading cert..."
-    SSHPASS="${_SSH_PW}" "${SCP_CMD[@]}" "${issued_chain}" "${_USER}@${_HOST}:${tmp_cert}" \
-        || { echo "${tag} FAILED: scp cert"; return 1; }
+    local scp_out="" scp_rc=0
+    scp_out=$(SSHPASS="${_SSH_PW}" "${SCP_CMD[@]}" "${issued_chain}" "${_USER}@${_HOST}:${tmp_cert}" 2>&1) \
+        || scp_rc=$?
+    if (( scp_rc != 0 )); then
+        if is_hostkey_error "${scp_out}"; then
+            handle_changed_hostkey "${_HOST}" "${_PORT}" "${tag}" || return 4
+            con "${tag} Retrying cert upload after host-key re-learn..."
+            SSHPASS="${_SSH_PW}" "${SCP_CMD[@]}" "${issued_chain}" "${_USER}@${_HOST}:${tmp_cert}" \
+                || { echo "${tag} FAILED: scp cert (after re-learn)"; return 1; }
+        else
+            printf '%s\n' "${scp_out}" >&2
+            echo "${tag} FAILED: scp cert"
+            return 1
+        fi
+    fi
 
     echo "${tag} Uploading key..."
     SSHPASS="${_SSH_PW}" "${SCP_CMD[@]}" "${KEY_FILE}" "${_USER}@${_HOST}:${tmp_key}" \
